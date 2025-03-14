@@ -14,7 +14,7 @@
 bl_info = {
     "name": "Grease Pencil QuickTools v3",
     "author": "pongbuster",
-    "version": (3, 1, 4),
+    "version": (3, 1, 5),
     "blender": (4, 3, 0),
     "location": "View3D > N sidebar",
     "description": "Adds grease pencil tool shortcuts to N sidebar",
@@ -89,18 +89,20 @@ def getPixel(X, Y):
 def centerCamera(context):
     # center and offset camera view
     bpy.ops.view3d.view_center_camera()
-    r3d = context.space_data.region_3d
-    r3d.view_camera_zoom = 14
-    r3d.view_camera_offset = [0.05, -0.005]
+    for r in context.area.regions:
+        if r.type == 'HEADER' and r.height != 1:
+            r3d = context.space_data.region_3d
+            r3d.view_camera_zoom = 14
+            r3d.view_camera_offset = [0.05, -0.005]
 
 
 
 class quickFrameSelectionOperator(bpy.types.Operator):
     """
 Click and drag to view region
-Clcik to zoom to mouse position
+Click to zoom to mouse position
 Shift click to zoom to selected points
-    """
+"""
     bl_idname = "quicktools.frame_selection"
     bl_label = "Frame Selection"
 
@@ -109,7 +111,8 @@ Shift click to zoom to selected points
     _counter = 0
     _first = _last = None
     _mousepos = None
-    min3d = max3d = None
+    _min3d = _max3d = None
+    _minx = _maxx = _miny = _maxy = None
 
     def pan(self, context, minx, miny, maxx, maxy):
         area = context.area
@@ -155,31 +158,31 @@ Shift click to zoom to selected points
         return 1
 
     def get_minmax(self, context):
-        minx = miny = 9999
-        maxx = maxy = -9999
 
         gp = context.active_object
 
-        if not gp: return  minx, miny, maxx, maxy
-        if gp.type != 'GREASEPENCIL': return  minx, miny, maxx, maxy
+        if not gp: return  9999, 9999, -9999, -9999
+        if gp.type != 'GREASEPENCIL': return  9999, 9999, -9999, -9999
         
         if self._first != None:
-            return self.min3d[0], self.min3d[2], self.max3d[0], self.max3d[2]
+            return self._min3d[0], self._min3d[2], self._max3d[0], self._max3d[2]
 
-        for lr in gp.data.layers:
-            if lr.lock == True or lr.hide == True: continue
-            frame = lr.current_frame()
-            if not frame: continue
-        
-            for stroke in frame.drawing.strokes:
-                for point in stroke.points:
-                    if point.select:
-                        minx = min(minx, point.position[0])
-                        maxx = max(maxx, point.position[0])
-                        miny = min(miny, point.position[2])
-                        maxy = max(maxy, point.position[2])
+        if self._minx == None:
+            for lr in gp.data.layers:
+                if lr.lock == True or lr.hide == True: continue
+                frame = lr.current_frame()
+                if not frame: continue
+                self._minx = self._miny = 9999
+                self._maxx = self._maxy = -9999
+                for stroke in frame.drawing.strokes:
+                    for point in stroke.points:
+                        if point.select:
+                            self._minx = min(self._minx, point.position[0])
+                            self._maxx = max(self._maxx, point.position[0])
+                            self._miny = min(self._miny, point.position[2])
+                            self._maxy = max(self._maxy, point.position[2])
                         
-        return minx, miny, maxx, maxy
+        return self._minx, self._miny, self._maxx, self._maxy
 
     def modal(self, context, event):
         context.area.tag_redraw()
@@ -206,12 +209,8 @@ Shift click to zoom to selected points
                 if not self._timer and self._first:
                     first3d = to3d(context, self._first)
                     last3d = to3d(context, self._last)
-                    minx = min(first3d[0], last3d[0])
-                    maxx = max(first3d[0], last3d[0])
-                    miny = min(first3d[2], last3d[2])
-                    maxy = max(first3d[2], last3d[2])
-                    self.min3d = (minx, 0, miny)
-                    self.max3d = (maxx, 0, maxy)
+                    self._min3d = ( min(first3d[0], last3d[0]), 0, min(first3d[2], last3d[2]) )
+                    self._max3d = ( max(first3d[0], last3d[0]), 0, max(first3d[2], last3d[2]) )
                     wm = context.window_manager
                     self._timer = wm.event_timer_add(0.001, window=context.window)
 
@@ -1020,20 +1019,26 @@ ESC or right click to exit fullscren.
     
     _timer = None
     _original_area = None
+    _side_open = False
+    _region_ui = None
+
+    @classmethod
+    def poll(self, context):
+        if context.active_object == None or context.active_object.type != 'GREASEPENCIL': return False
+        return context.window.width != context.area.width
 
     def show(self, context, isFull):
+        
         if context.area:
             isFullScreen = context.window.width == context.area.width
         else:
-            isFullScreen = True
-            
-        if not isFullScreen:
-           context.window.cursor_modal_set("NONE")
-        else:
-           context.window.cursor_modal_restore()
+            return
         
-        bpy.ops.screen.screen_full_area(use_hide_panels=True)
-        bpy.ops.wm.window_fullscreen_toggle()
+        try: bpy.ops.screen.screen_full_area(use_hide_panels=True)
+        except: pass
+    
+        try: bpy.ops.wm.window_fullscreen_toggle()
+        except: pass
 
         for area in context.screen.areas:
             if area.type == 'VIEW_3D':
@@ -1043,40 +1048,57 @@ ESC or right click to exit fullscren.
                             if space.type == 'VIEW_3D':
                                 override = {'screen' : context.screen, 'area' : area, 'region' : region, 'space' : space }
                                 with context.temp_override(**override):
+                                    if context.space_data.region_3d.view_perspective != 'CAMERA':
+                                        bpy.ops.view3d.view_camera()
                                     bpy.context.space_data.overlay.show_overlays = isFullScreen
                                     bpy.context.space_data.show_gizmo = isFullScreen
                                     if isFullScreen: centerCamera(bpy.context)
                         
     def modal(self, context, event):
+        if context.area:
+            if event.mouse_x > context.area.width - 40 and event.mouse_y < 40:
+                if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+                    context.area.spaces[0].show_region_ui = self._region_ui.width == 1
+                elif event.type == 'RIGHTMOUSE' and event.value == 'PRESS':
+                    self.show(context, True)
+                    return {'FINISHED'}
+
         if event.type == 'TIMER':
-            for area in context.screen.areas:
-                if area.type == 'VIEW_3D':
-                    for region in area.regions:
-                        if region.type == "WINDOW":
-                            override = {'screen' : context.screen, 'area' : area, 'region' : region }
-                            with context.temp_override(**override):
-                                try:
-                                    bpy.ops.view3d.view_center_camera()
-                                    area.spaces[0].region_3d.view_camera_zoom=29
-                                except:
-                                    pass
-            if self._timer:                    
-                wm = context.window_manager
-                wm.event_timer_remove(self._timer)
-                self._timer = None
-                        
-        elif event.type in {'ESC', 'RIGHTMOUSE'} and not self._timer:
+            if self._timer:
+                for area in context.screen.areas:
+                    if area.type == 'VIEW_3D':
+                        for region in area.regions:
+                            if region.type == "WINDOW":
+                                override = {'screen' : context.screen, 'area' : area, 'region' : region }
+                                with context.temp_override(**override):
+                                    try:
+                                        bpy.ops.view3d.view_center_camera()
+                                        area.spaces[0].region_3d.view_camera_zoom=29
+                                    except:
+                                        pass
+                if self._timer:                    
+                    wm = context.window_manager
+                    wm.event_timer_remove(self._timer)
+                    self._timer = None
+            
+        elif event.type in {'ESC'} and not self._timer or context.area == None:
             self.show(context, True)
             return {'FINISHED'}
 
         return  {'PASS_THROUGH'}
 
     def execute(self, context):
+        for r in context.area.regions:
+            if r.type == 'UI': self._region_ui = r
+
+        self._mmb_action = context.window_manager.keyconfigs['Blender'].preferences.v3d_mmb_action
+
         bpy.ops.view3d.view_center_camera()
         for area in context.screen.areas:
             if area.type == 'VIEW_3D':        
                 _original_area = context.area
         self.show(context, False)
+
         wm = context.window_manager
         self._timer = wm.event_timer_add(0, window=context.window)
         context.window_manager.modal_handler_add(self)
@@ -1175,7 +1197,6 @@ class QuickSelectPointsOperator(bpy.types.Operator):
             return self.execute(context)
         elif event.alt:
             try: 
-                print("Deselecting ALL strokes")
                 gp = context.active_object
                 for layer in gp.data.layers:
                     if layer.lock == True or layer.hide == True: continue
@@ -2014,7 +2035,263 @@ class quickTaperStrokeOperator(bpy.types.Operator):
             
         return {'FINISHED'}
 
+PREC = 4
         
+class quickGeometryFillOperator(bpy.types.Operator):
+    """Click to fill with matching points\nusing acive material and color"""
+    bl_idname = "quicktools.geometry_fill"
+    bl_label = "QuickTools Geometry Fill"
+
+    _poly_edges = []
+
+    def createStroke(self, points):
+        C = bpy.context
+
+        matIndex = C.active_object.active_material_index
+        lineWidth = C.tool_settings.gpencil_paint.brush.size
+
+        clr = C.tool_settings.gpencil_paint.brush.color
+        vertexColor = (0,0,0,1)
+        
+        clr = C.tool_settings.gpencil_paint.brush.color 
+        fillColor = (s2lin(clr.r), s2lin(clr.g), s2lin(clr.b), 1)
+        
+        gp = C.active_object
+        layer = gp.data.layers.active
+        
+        for frame in layer.frames:
+            if frame.frame_number == C.scene.frame_current:
+                frame.drawing.add_strokes([len(points)])
+                newStroke = frame.drawing.strokes[-1]
+                if newStroke == None:
+                    print("Error adding stroke", len(points))
+                    return
+                newStroke.material_index = matIndex
+                newStroke.fill_color = fillColor                        
+                for idx, pt in enumerate(points):
+                    newStroke.points[idx].position = (pt[0], 0, pt[1])
+                    newStroke.points[idx].vertex_color = vertexColor
+                    newStroke.points[idx].radius = lineWidth
+                newStroke.cyclic = True
+
+        bpy.ops.ed.undo_push(message = 'Added GeometryFill')
+
+    def isvclose(v1, v2):
+        return (v2 - v1).length < 0.0001
+
+    def pointInPoly(self, x, y, poly):
+        inside = False
+        p1x, p1y = poly[0]
+        n = len(poly)
+        for i in range(n+1):
+            p2x, p2y = poly[i % n]
+            if y > min(p1y, p2y):
+                if y <= max(p1y, p2y):
+                    if x <= max(p1x, p2x):
+                        if p1y != p2y:
+                            xinters = (y-p1y) * (p2x-p1x)/(p2y-p1y)+p1x
+                        if p1x == p2x or x <= xinters:
+                            inside = not inside
+            p1x, p1y = p2x, p2y
+        return inside
+
+    def getIntersections(self, edges, edge):
+        intersections = []
+        for edge1 in edges:
+            if edge1 == edge:
+                continue
+            ix = mathutils.geometry.intersect_line_line_2d(edge1[0], edge1[1], edge[0], edge[1])
+            if ix:
+                ix = (round(ix[0], PREC), round(ix[1], PREC) )
+                start_point = Vector(edge[0])
+                d = (start_point - Vector(ix)).length
+                intersections.append( (d, ix) )
+        intersections.sort()
+        return intersections
+
+    def getConnectedEdges(self, edges, pt):
+        ret = []
+        for edge in edges:
+            if edge[0] == pt or (edge[1] == pt):
+                ret.append(edge)
+        return ret
+
+    def fillPoly(self, context, clicked_spot):
+                
+        # remove duplicate edges if they exist
+        # polyedges = list(dict.fromkeys(polyedges))
+
+        up_ray = ( (clicked_spot[0], clicked_spot[1]), (clicked_spot[0], 9999) )
+
+        closest_edges = []
+
+        for edge in self._poly_edges:
+            ix = mathutils.geometry.intersect_line_line_2d(edge[0], edge[1], up_ray[0], up_ray[1])
+            if ix:
+                closest_edges.append( [ (ix - Vector(clicked_spot)).length, edge ] ) 
+
+        closest_edges.sort()
+
+        for closest_edge in closest_edges:
+            ev = Vector(closest_edge[1][1]) - Vector(closest_edge[1][0])
+            cv = Vector(closest_edge[1][1]) - Vector(clicked_spot) 
+            
+            clockwise = ev.cross(cv) >= 0
+            
+            closed_poly = [ closest_edge[1][0] ]
+            
+            active_edge = closest_edge[1]
+
+            while(1):
+                connected_edges = self.getConnectedEdges(self._poly_edges, active_edge[1])
+                
+                if len(connected_edges) == 0:
+                    break
+                
+                sorted = []
+                
+                for edge in connected_edges:
+                    if edge == active_edge or (edge[1], edge[0]) == active_edge:
+                        continue
+                    if edge[1] == active_edge[1]: edge = ( edge[1], edge[0] )
+                    v1 = Vector(active_edge[1]) - Vector(active_edge[0])
+                    v2 = Vector(active_edge[1]) - Vector(edge[1])
+                    cross = v1.cross(v2)
+                    angle = math.degrees(v1.angle(v2))
+                    if clockwise:
+                        if cross < 0: angle = 360 - angle
+                    else:
+                        if cross >= 0: angle = 360 - angle
+                    sorted.append( [ angle, edge ] )
+                
+                if len(sorted) == 0:
+                    print("hanging edge")
+                    return
+                
+                sorted.sort()
+                
+                active_edge = sorted[0][1]
+                
+                closed_poly.append(active_edge[0])
+
+                if active_edge[1] == closed_poly[0]:
+                    break
+                
+                if len(closed_poly) == 9999:
+                    print("quickGeometryFill break limit reached")
+                    break
+
+            if self.pointInPoly(clicked_spot[0], clicked_spot[1], closed_poly):
+                self.createStroke(closed_poly)
+                break
+                
+
+    @classmethod
+    def poll(self, context):
+        return (context.active_object.type == 'GREASEPENCIL')
+
+    def modal(self, context, event):
+        if event.type in {'RIGHTMOUSE', 'ESC'}:
+            context.window.cursor_modal_restore()
+            return {'FINISHED'}
+            
+        if (context.area.x < event.mouse_x < context.area.x + context.area.width) == False:
+            context.window.cursor_modal_restore()
+            return {'RUNNING_MODAL'}
+        
+        if (context.area.y < event.mouse_y < context.area.y + context.area.height) == False:
+            context.window.cursor_modal_restore()
+            return {'RUNNING_MODAL'}
+        
+        ui_width = ui_height = 1
+        for region in context.area.regions:
+            if region.type == 'UI':
+                ui_width = region.width
+                ui_height = region.height
+                break
+            
+        wdth = context.area.x + context.area.width - ui_width
+        
+        if event.mouse_x > wdth:
+            if event.mouse_y > context.area.y + ui_height - 80:
+                context.window.cursor_modal_restore()
+                return {'PASS_THROUGH'}
+            else:
+                return {'RUNNING_MODAL'}
+        
+        context.window.cursor_modal_set("PAINT_BRUSH")
+                
+        if event.type  == 'LEFTMOUSE' and event.value == "PRESS":
+            pt = view3d_utils.region_2d_to_location_3d(context.region, context.space_data.region_3d, 
+                (event.mouse_region_x, event.mouse_region_y), (0,0,0))
+            self.fillPoly(bpy.context, (pt[0], pt[2]) )
+            return {'RUNNING_MODAL'}
+        
+        return {'RUNNING_MODAL'}
+
+    def invoke(self, context, event):
+        gp = bpy.context.active_object
+
+        PREC = 4
+
+        rawedges = []
+        polyedges = []
+                    
+        # create list of raw edge data from Grease Pencil strokes        
+        for layer in gp.data.layers: 
+            if layer.hide or layer.lock: continue
+            for stroke in layer.current_frame().drawing.strokes:
+                if len(stroke.points) < 2: continue
+                pts = [ ( round(v.position[0], PREC), round(v.position[2], PREC) ) for v in stroke.points]
+                for pt1, pt2 in zip(pts, pts[1:]):
+                    if rawedges.count( (pt1, pt2) ) > 0 or rawedges.count( (pt2, pt1) ) > 0:
+                        continue # don't add duplicate edges
+                    rawedges.append( (pt1, pt2) )
+                if stroke.cyclic and pt2 != pts[0]:
+                    rawedges.append( (pt2, pts[0]) )
+
+        # calculate edge intersections of raw edge data and create list of individual unique edges
+        for edge in rawedges:
+            intersections = self.getIntersections(rawedges, edge)
+            if len(intersections) == 0: # no shared point?
+                continue
+            elif len(intersections) == 1:
+                polyedges.append(edge)
+            else:
+                pt = edge[0]
+                for ix in intersections:
+                    if ix[1] == pt or ix[1] == (pt[1], pt[0]):
+                        continue
+                    newedge = ( pt, (ix[1][0], ix[1][1]) )
+                    if polyedges.count( newedge) == 0 and polyedges.count( (newedge[1], newedge[0]) ) == 0:
+                        polyedges.append( newedge )
+                    pt = ( ix[1][0], ix[1][1] )
+
+        while(1): # remove hanging edges
+            edge_counts = []
+            for edge in polyedges:
+                pt1 = Vector(edge[0])
+                pt2 = Vector(edge[1])
+                cnt1 = cnt2 = 0
+                for edge2 in polyedges:
+                    if edge2 == edge: continue
+                    pt3 = Vector(edge2[0])
+                    pt4 = Vector(edge2[1])
+                    if (pt3 - pt1).length < 0.001 or (pt4 - pt1).length < 0.001: cnt1 += 1
+                    if (pt3 - pt2).length < 0.001 or (pt4 - pt2).length < 0.001: cnt2 += 1
+                if cnt1 > 0 and cnt2 > 0: edge_counts.append(edge)
+
+            if len(edge_counts) == len(polyedges):
+                break
+                
+            polyedges = edge_counts
+            
+        self._poly_edges = polyedges
+            
+        context.window.cursor_modal_set("PAINT_BRUSH")
+        context.window_manager.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
             
 class QuickToolsSetToolOperator(bpy.types.Operator):
     args : bpy.props.StringProperty()    
@@ -2074,6 +2351,10 @@ class QuickToolsSetToolOperator(bpy.types.Operator):
                  bpy.context.scene.tool_settings.use_gpencil_select_mask_stroke = not bpy.context.scene.tool_settings.use_gpencil_select_mask_stroke
             elif _tool == "DRAW_ONBACK":
                 bpy.context.scene.tool_settings.use_gpencil_draw_onback = not bpy.context.scene.tool_settings.use_gpencil_draw_onback
+            elif _tool == "SHOW_OVERLAYS":
+                context.area.spaces[0].overlay.show_overlays = not context.area.spaces[0].overlay.show_overlays
+            elif _tool == "SHOW_GIZMOS":
+                context.area.spaces[0].show_gizmo = not context.area.spaces[0].show_gizmo
             elif _tool == "MFE":
                 context.tool_settings.use_grease_pencil_multi_frame_editing = not context.tool_settings.use_grease_pencil_multi_frame_editing
             elif _tool == "DRAW_ADDITIVE":
@@ -2370,14 +2651,13 @@ class QuickToolsPanel(bpy.types.Panel):
         self.addOperator(ctool, row, QuickToolsSetToolOperator.bl_idname, "EVENT_TABLET_ERASER", "PAINT_GREASE_PENCIL|builtin_brush.Erase")
         
         row = box2.row()
-        row.operator(QuickToolsSetToolOperator.bl_idname, text="", icon="SORTBYEXT", depress=context.tool_settings.use_gpencil_draw_additive).args = "OPS|DRAW_ADDITIVE"
+        row.operator(QuickToolsSetToolOperator.bl_idname, text="", icon="GIZMO", depress=context.area.spaces[0].show_gizmo).args = "OPS|SHOW_GIZMOS"
         row = box2.row(align=True)
         onback = context.scene.tool_settings.use_gpencil_draw_onback
         row.operator(QuickToolsSetToolOperator.bl_idname, icon="SELECT_SUBTRACT", depress=onback==True).args = "OPS|DRAW_ONBACK"
         row = box2.row()
-        mfe = context.tool_settings.use_grease_pencil_multi_frame_editing
-        row.alert = mfe == True
-        row.operator(QuickToolsSetToolOperator.bl_idname, icon="GP_MULTIFRAME_EDITING", depress=mfe==True).args = "OPS|MFE"
+        overlays = context.area.spaces[0].overlay.show_overlays
+        row.operator(QuickToolsSetToolOperator.bl_idname, icon="OVERLAY", depress=overlays==True).args = "OPS|SHOW_OVERLAYS"
         
  
         first_row = layout.row(align=True)
@@ -2409,8 +2689,11 @@ class QuickToolsPanel(bpy.types.Panel):
         self.addOperator(ctool, row, QuickToolsSetToolOperator.bl_idname, "RESTRICT_SELECT_OFF", "SCULPT_GREASE_PENCIL|builtin.select_circle")
         
         row = box2.row()
-        row.separator()
-        row.scale_y = 8
+        row.operator(QuickToolsSetToolOperator.bl_idname, text="", icon="SORTBYEXT", depress=context.tool_settings.use_gpencil_draw_additive).args = "OPS|DRAW_ADDITIVE"
+        row = box2.row()
+        mfe = context.tool_settings.use_grease_pencil_multi_frame_editing
+        row.alert = mfe == True
+        row.operator(QuickToolsSetToolOperator.bl_idname, icon="GP_MULTIFRAME_EDITING", depress=mfe==True).args = "OPS|MFE"
         row = box2.row()
         row.operator('quicktools.interpolate_stroke', text="", icon = "AUTO")
         
@@ -2433,6 +2716,7 @@ class QuickToolsPanel(bpy.types.Panel):
         
 # Class list to register
 _classes = [
+    quickGeometryFillOperator,
     quickFrameSelectionOperator,
     quickTaperStrokeOperator,
     quickAlignOperator,
