@@ -14,7 +14,7 @@
 bl_info = {
     "name": "Grease Pencil QuickTools v3",
     "author": "pongbuster",
-    "version": (3, 1, 5),
+    "version": (3, 1, 6),
     "blender": (4, 3, 0),
     "location": "View3D > N sidebar",
     "description": "Adds grease pencil tool shortcuts to N sidebar",
@@ -2035,14 +2035,17 @@ class quickTaperStrokeOperator(bpy.types.Operator):
             
         return {'FINISHED'}
 
-PREC = 4
-        
+
+
 class quickGeometryFillOperator(bpy.types.Operator):
     """Click to fill with matching points\nusing acive material and color"""
     bl_idname = "quicktools.geometry_fill"
     bl_label = "QuickTools Geometry Fill"
 
     _poly_edges = []
+    
+    PREC = 4
+    THRESHOLD = 0.00001
 
     def createStroke(self, points):
         C = bpy.context
@@ -2096,18 +2099,20 @@ class quickGeometryFillOperator(bpy.types.Operator):
         return inside
 
     def getIntersections(self, edges, edge):
+        """Get sorted intersections of an edge with other edges"""
         intersections = []
-        for edge1 in edges:
-            if edge1 == edge:
+        v1, v2 = edge
+        
+        for e in edges:
+            if e == edge:
                 continue
-            ix = mathutils.geometry.intersect_line_line_2d(edge1[0], edge1[1], edge[0], edge[1])
+            ix = mathutils.geometry.intersect_line_line_2d(e[0], e[1], v1, v2)
             if ix:
-                ix = (round(ix[0], PREC), round(ix[1], PREC) )
-                start_point = Vector(edge[0])
-                d = (start_point - Vector(ix)).length
-                intersections.append( (d, ix) )
-        intersections.sort()
-        return intersections
+                ix_rounded = (round(ix[0], self.PREC), round(ix[1], self.PREC))
+                dist = (Vector(v1) - Vector(ix_rounded)).length
+                intersections.append((dist, ix_rounded))
+        
+        return sorted(intersections)
 
     def getConnectedEdges(self, edges, pt):
         ret = []
@@ -2118,9 +2123,6 @@ class quickGeometryFillOperator(bpy.types.Operator):
 
     def fillPoly(self, context, clicked_spot):
                 
-        # remove duplicate edges if they exist
-        # polyedges = list(dict.fromkeys(polyedges))
-
         up_ray = ( (clicked_spot[0], clicked_spot[1]), (clicked_spot[0], 9999) )
 
         closest_edges = []
@@ -2230,64 +2232,58 @@ class quickGeometryFillOperator(bpy.types.Operator):
         return {'RUNNING_MODAL'}
 
     def invoke(self, context, event):
-        gp = bpy.context.active_object
-
-        PREC = 4
-
-        rawedges = []
-        polyedges = []
-                    
-        # create list of raw edge data from Grease Pencil strokes        
-        for layer in gp.data.layers: 
-            if layer.hide or layer.lock: continue
-            for stroke in layer.current_frame().drawing.strokes:
-                if len(stroke.points) < 2: continue
-                pts = [ ( round(v.position[0], PREC), round(v.position[2], PREC) ) for v in stroke.points]
-                for pt1, pt2 in zip(pts, pts[1:]):
-                    if rawedges.count( (pt1, pt2) ) > 0 or rawedges.count( (pt2, pt1) ) > 0:
-                        continue # don't add duplicate edges
-                    rawedges.append( (pt1, pt2) )
-                if stroke.cyclic and pt2 != pts[0]:
-                    rawedges.append( (pt2, pts[0]) )
-
-        # calculate edge intersections of raw edge data and create list of individual unique edges
-        for edge in rawedges:
-            intersections = self.getIntersections(rawedges, edge)
-            if len(intersections) == 0: # no shared point?
+        """Initialize operator"""
+        gp = context.active_object
+        self._poly_edges.clear()
+        
+        # Use sets for O(1) lookup
+        raw_edges = set()
+        for layer in gp.data.layers:
+            if layer.hide or layer.lock:
                 continue
-            elif len(intersections) == 1:
-                polyedges.append(edge)
+            for stroke in layer.current_frame().drawing.strokes:
+                if len(stroke.points) < 2:
+                    continue
+                pts = [(round(v.position[0], self.PREC), round(v.position[2], self.PREC)) 
+                       for v in stroke.points]
+                raw_edges.update((p1, p2) for p1, p2 in zip(pts, pts[1:]))
+                if stroke.cyclic and pts[-1] != pts[0]:
+                    raw_edges.add((pts[-1], pts[0]))
+
+        # Process intersections
+        poly_edges = set()
+        for edge in raw_edges:
+            intersections = self.getIntersections(raw_edges, edge)
+            if not intersections:
+                continue
+            if len(intersections) == 1:
+                poly_edges.add(edge)
             else:
                 pt = edge[0]
-                for ix in intersections:
-                    if ix[1] == pt or ix[1] == (pt[1], pt[0]):
-                        continue
-                    newedge = ( pt, (ix[1][0], ix[1][1]) )
-                    if polyedges.count( newedge) == 0 and polyedges.count( (newedge[1], newedge[0]) ) == 0:
-                        polyedges.append( newedge )
-                    pt = ( ix[1][0], ix[1][1] )
+                for _, ix in intersections:
+                    if ix != pt and ix != (pt[1], pt[0]):
+                        new_edge = (pt, ix)
+                        poly_edges.add(new_edge)
+                    pt = ix
 
-        while(1): # remove hanging edges
-            edge_counts = []
-            for edge in polyedges:
-                pt1 = Vector(edge[0])
-                pt2 = Vector(edge[1])
-                cnt1 = cnt2 = 0
-                for edge2 in polyedges:
-                    if edge2 == edge: continue
-                    pt3 = Vector(edge2[0])
-                    pt4 = Vector(edge2[1])
-                    if (pt3 - pt1).length < 0.001 or (pt4 - pt1).length < 0.001: cnt1 += 1
-                    if (pt3 - pt2).length < 0.001 or (pt4 - pt2).length < 0.001: cnt2 += 1
-                if cnt1 > 0 and cnt2 > 0: edge_counts.append(edge)
-
-            if len(edge_counts) == len(polyedges):
+        # Remove hanging edges efficiently
+        while True:
+            edge_counts = {}
+            for edge in poly_edges:
+                edge_counts[edge] = sum(1 for e in poly_edges if e != edge and 
+                                      ((Vector(e[0]) - Vector(edge[0])).length < self.THRESHOLD or 
+                                       (Vector(e[1]) - Vector(edge[0])).length < self.THRESHOLD or
+                                       (Vector(e[0]) - Vector(edge[1])).length < self.THRESHOLD or
+                                       (Vector(e[1]) - Vector(edge[1])).length < self.THRESHOLD))
+            
+            
+            valid_edges = {e for e, count in edge_counts.items() if count > 1}
+            if len(valid_edges) == len(poly_edges):
                 break
-                
-            polyedges = edge_counts
-            
-        self._poly_edges = polyedges
-            
+            poly_edges = valid_edges
+
+        self._poly_edges = list(poly_edges)
+        
         context.window.cursor_modal_set("PAINT_BRUSH")
         context.window_manager.modal_handler_add(self)
         return {'RUNNING_MODAL'}
@@ -2439,17 +2435,26 @@ class QuickToolsSetToolOperator(bpy.types.Operator):
                 for fp in Path(user_library.path).glob("**/*.blend"):
                     asset_blends.append(fp)        
                     asset_brushes.append(fp.name.replace(".asset.blend",""))
+
+            used_custom = False
             
             if asset_brushes.count(brush_name) > 0:
                 idx = asset_brushes.index(brush_name)
                 ass_blend = asset_blends[idx].relative_to(user_library.path)
                 ass_id = os.path.join(ass_blend, "Brush", brush_name)
-                bpy.ops.brush.asset_activate(asset_library_type='CUSTOM', asset_library_identifier="User Library", \
-                    relative_asset_identifier=ass_id)
-            else:
+                if asset_blends[idx].exists() == True:
+                    try:
+                        bpy.ops.brush.asset_activate(asset_library_type='CUSTOM', asset_library_identifier="User Library", \
+                            relative_asset_identifier = ass_id)
+                        used_custom = True
+                    except:
+                        used_custom = False
+                else:
+                    used_custom = False
+            
+            if not used_custom:
                 library = 'ESSENTIALS'
                 type, brush_name = _tool.split('.')
-                
                 if _mode == 'SCULPT_GREASE_PENCIL' and type != 'builtin':
                     brush_dir = os.path.join('brushes', 'essentials_brushes-gp_sculpt.blend', 'Brush', brush_name)
                     bpy.ops.brush.asset_activate(asset_library_type=library, relative_asset_identifier=brush_dir)
@@ -2457,7 +2462,11 @@ class QuickToolsSetToolOperator(bpy.types.Operator):
                     brush_dir = os.path.join('brushes', 'essentials_brushes-gp_vertex.blend', 'Brush', brush_name)
                     bpy.ops.brush.asset_activate(asset_library_type=library, relative_asset_identifier=brush_dir)
                 else:
-                    bpy.ops.wm.tool_set_by_id(name=_tool)
+                    try:
+                        bpy.ops.wm.tool_set_by_id(name=_tool)
+                    except:
+                        print(_tool)
+                        
 
             if brush:
                 if bpy.context.tool_settings.gpencil_paint.brush:
